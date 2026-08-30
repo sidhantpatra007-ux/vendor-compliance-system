@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+pandas
+python-multipart
+sqlalchemy
+python-dotenv
+httpx
+rapidfuzz
+google-genai
+arelle-release
+pdfplumber
+pytesseract
+pdf2image
+Pillow
+psycopg2-binary
+itsdangerous

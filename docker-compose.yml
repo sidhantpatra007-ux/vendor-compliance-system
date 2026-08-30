@@ -1,0 +1,45 @@
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    restart: unless-stopped
+    ports:
+      - "5679:5678"
+    environment:
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - N8N_WEBHOOK_URL=http://localhost:5679/
+      - N8N_EDITOR_BASE_URL=http://localhost:5679/
+      - GENERIC_TIMEZONE=Asia/Kolkata
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+    volumes:
+      - ./n8n_data:/home/node/.n8n
+    networks:
+      - automation-net
+
+  python-service:
+    build: ./python-service
+    restart: unless-stopped
+    depends_on:
+      - sanctions-service
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./python-service/.env
+    volumes:
+      - ./python-service/data:/app/data
+      - ./evidence:/app/evidence
+    networks:
+      - automation-net
+
+  sanctions-service:
+    build: ./sanctions-service
+    restart: unless-stopped
+    volumes:
+      - ./sanctions-data:/app/data
+    networks:
+      - automation-net
+
+networks:
+  automation-net:
+    driver: bridge
