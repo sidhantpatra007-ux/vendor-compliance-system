@@ -1,10 +1,25 @@
 # Vendor Compliance & Risk Monitoring System — Production Upgrade Spec
 
-You are being handed an existing, working vendor compliance/onboarding/monitoring system. Your job is to extend it to production-grade without breaking what already works. Read this entire spec before writing any code. Do not restyle, rename, or restructure existing files beyond what's explicitly requested here.
+Existing, working vendor compliance/onboarding/monitoring system. This document
+is the single source of truth for what's planned vs already built. It replaces
+all earlier versions of this file — don't reconstruct priorities from an older
+copy sitting in git history or a chat transcript. Read it fully before writing
+code. Do not restyle, rename, or restructure existing files beyond what's
+explicitly requested here.
+
+## 0. Scope question to answer before building Section 5
+
+**Is any actual client FCA-regulated, doing "material outsourcing" under
+SYSC 8?** This determines whether the governance layer in Section 5
+(review_requests, offboarding workflow, reassessment cadence) is a near-term
+requirement or genuinely deferrable. If unregulated SMB — defer it. If
+FCA-regulated — it's closer to a regulatory expectation and should move up.
+Don't guess this. Ask.
 
 ## 1. Existing system — read this before touching anything
 
-**Frontend**: React + Vite + TypeScript + Tailwind + Recharts + lucide-react + @tanstack/react-query + react-router-dom. Key files:
+**Frontend**: React + Vite + TypeScript + Tailwind + Recharts + lucide-react +
+@tanstack/react-query + react-router-dom. Key files:
 - `src/api.ts` — single `dashboard` object wrapping all fetch calls
 - `src/types.ts` — shared TS interfaces
 - `src/hooks.ts` — react-query hooks, 90-second poll interval
@@ -12,7 +27,8 @@ You are being handed an existing, working vendor compliance/onboarding/monitorin
 - `src/components.tsx` — shared UI primitives (Grade, Severity, IconMetric, Empty, Loading, ErrorCard)
 - `src/Layout.tsx` — sidebar nav + header shell
 
-**Backend**: FastAPI service at `python-service:8000` (exact repo not provided — infer route signatures from the frontend contract below and confirm against the actual backend code before implementing).
+**Backend**: FastAPI service at `python-service:8000` (`main.py`, SQLAlchemy
+models in `models.py`, Postgres/Supabase via `DATABASE_URL`).
 
 **Current API contract** (do not break these):
 ```
@@ -37,78 +53,232 @@ Evidence { evidence_id, concept, state, extraction_method, page, captured_at, im
 Decision { decision_id, decision, reviewer, note, next_review_at, created_at }
 Detail { vendor_id, vendor_name, company_number, intake, latest{...}, score_history[], financial_evidence[], review_decisions[], alerts[], audit_events[] }
 ```
-Note: `AuditEvent`, `Alert.sla_due_at/acknowledged_at/resolved_at`, and `Decision.next_review_at` already exist. Build on top of these — do not create parallel/duplicate concepts.
 
-**n8n workflow** (exported as `vendor_compliance_checker.json`): a nightly `Schedule Trigger` calls `/refresh-all`, splits out vendors with new alerts, fetches vendor detail, builds a Google News RSS query per vendor, and emails a "Vendor Change Review" report. Separately, a `New Vendor Due-Diligence Intake` form feeds a `Classify Onboarding Risk` code node that routes to Blocked / Enhanced Review / Standard, each branch ending in an email with no persistence back to the backend.
+**Backend financial extraction pipeline** (`companies_house/xbrl.py` →
+`pdf_extract.py` → `ocr_extract.py`, in that fallback order): XBRL first,
+PDF-text second, scanned-image OCR (pytesseract) last. `amount_parse.py` is
+shared by the PDF and OCR tiers for currency/locale-aware number parsing.
 
 ## 2. Objective
 
-Close the gap between "computes good signals" and "persists, tiers, and tracks them as auditable, actionable data." Every addition below should either (a) make data durable that currently only exists transiently in an email or a single computation, (b) add risk-tiering so monitoring/alerting isn't one-size-fits-all, or (c) close the loop on human review so decisions feed back into the system instead of dead-ending.
+Close the gap between "computes good signals" and "persists, tiers, tracks,
+and surfaces them as auditable, client-facing value." Sequence work toward
+what a client actually notices and would pay for, not toward enterprise TPRM
+governance ceremony that doesn't match this product's current stage.
 
-## 3. Database changes
+## 3. Decided — do not re-litigate
 
-Confirm the actual DB engine (Postgres/Supabase based on context) before writing migrations. Required additions:
+These were evaluated and closed. Re-opening them without new evidence wastes
+a session.
 
-- **`risk_tier` column** on the vendor table: enum `critical | high | medium | low`, distinct from the existing `latest_grade` (A–E). Grade reflects computed risk score; tier reflects business criticality (data access, subcontractor use, regulatory exposure, contract value) and drives monitoring frequency. Backfill logic: derive an initial tier from existing `intake` fields (`processes_personal_data`, `access_to_client_systems_or_data`, `uses_subcontractors`) if present.
-- **`next_review_due` column** on the vendor table (date). Set on onboarding, recalculated on each formal reassessment. Suggested default cadence: critical = 12 months + continuous monitoring, high = 18 months, medium/low = 24 months or event-driven — confirm exact cadence with the project owner before hardcoding.
-- **`evidence` table** (new — separate from the existing `financial_evidence`/`Evidence` concept): `id, vendor_id, source (news|sanctions|companies_house|other), type, payload_json, retrieved_at`. Purpose: persist the Google News RSS results and any sanctions-match output that n8n currently only emails, so they're queryable per vendor instead of disappearing after the email sends.
-- **`remediation_tasks` table** (new): `id, alert_id, vendor_id, owner, status (open|in_progress|resolved), due_date, resolution_notes, created_at, updated_at`. Purpose: alerts should become tracked work items with an owner and due date, not a flat list.
-- **`review_requests` table** (new, or extend `review_decisions` if the schema allows a `status` of `pending`): `id, vendor_id, reasons_json, assigned_reviewer, status (pending|approved|rejected), created_at, decided_at`. Purpose: the "Enhanced Review Required" onboarding branch needs a durable record the moment it fires, not just at the point a decision is made.
-- **Audit log integrity**: confirm the existing `audit_events`/`AuditEvent` table has no `UPDATE`/`DELETE` grants for the application's runtime DB role — timestamps must be system-assigned at insert time, and no role (including admin) should be able to retroactively edit a row. If this isn't already true, add a migration that revokes those grants and, if using Postgres, add a trigger that rejects `UPDATE`/`DELETE` on that table outright.
-- **`offboarding` support**: add a `status` value (`active|offboarding|terminated`) on the vendor table plus an `offboarded_at`/`offboarding_reason` pair. There is currently no way to formally end a vendor relationship in the system.
+- **LLM provider for `compliance/summarize.py` stays Gemini.** The idea of
+  switching to ChatGPT/OpenAI "for cost" was based on a false premise:
+  ChatGPT's free/unlimited tier applies to the consumer chat app, not the
+  OpenAI API — which is what `summarize.py` would call, and which bills
+  per-token exactly like Gemini's API does. Gemini also already has a
+  comparable free tier (Google AI Studio, Flash models, no card required).
+  This specific call (~300 input / ~150 output tokens, one summary per score
+  change) costs a fraction of a cent per call on Gemini 2.5 Flash's paid
+  rate regardless — not a meaningful cost lever either direction at this
+  project's volume. `GEMINI_API_KEY` and `summarize.py` are unchanged.
+  Only reopen this if there's an actual observed bill, a real model-quality
+  complaint about the summaries, or a concrete non-cost reason.
 
-## 4. Backend changes (FastAPI)
+## 4. In progress / needs validation
 
-- `POST /dashboard/vendors/{id}/evidence` — accepts `{source, type, payload}`, used by n8n to persist news/adverse-media results instead of only emailing them.
-- `POST /dashboard/vendors/{id}/review-requests` — creates a pending review request with reasons; called by n8n the moment the "Needs Enhanced Review?" branch fires.
-- Modify `POST /dashboard/vendors/{id}/review-decisions` — after saving the decision, also fire an outbound HTTP POST to an n8n webhook URL (configurable via env var) with `{vendor_id, decision, reasons}`, so n8n can resume and send the vendor-facing approval/rejection email. This is the connective piece that closes the loop between "reviewer clicks Approve/Reject on the dashboard" and "vendor gets notified."
-- `POST /dashboard/vendors/{id}/offboard` — sets status to `offboarding`/`terminated`, records reason, timestamps it.
-- `PATCH /dashboard/alerts/{id}/remediation` — sets owner/status/due_date/resolution_notes on a remediation task tied to an alert. Extend rather than replace the existing `/dashboard/alerts/{id}/status` endpoint if that already covers part of this.
-- `GET /dashboard/vendors?tier=critical` — allow filtering the existing vendors list by `risk_tier`.
-- Alert deduplication: before inserting a new alert row, check for an existing open alert on the same `vendor_id` + same underlying issue signature (e.g. same `title`/category) and update it instead of creating a duplicate. Apply this at the endpoint the nightly refresh calls into, not in n8n.
-- Tier-aware refresh scheduling: if `/refresh-all` currently checks every vendor uniformly, add a parameter or separate endpoint (`/refresh-all?tier=critical`) so n8n can call it at different frequencies per tier.
+- **`amount_parse.py::parse_amounts_in_line` — bare-year fix applied, not yet
+  validated against a real filing.** The bug: a concept line like "Net
+  assets 2024 2023" (a duplicated table header) or one with a nearby "for
+  the year ended 31 December 2024" would return the year as the extracted
+  value, because the regex had no concept of "this looks like a year, not
+  money." Fix: real amount-shaped tokens (currency symbol, or a
+  comma/decimal thousands separator) now sort ahead of bare 4-digit
+  1900–2099 tokens on the same line, so `amounts[0]` — which
+  `pdf_extract.py` and `ocr_extract.py` both consume as the primary
+  candidate — is the real figure when both appear on one line. The bare
+  year is never *discarded*, only deprioritized, so it's still returned
+  (and still flagged low-confidence via the existing `needs_manual_review`
+  path) if it's genuinely the only number on the line. **Not yet tested
+  against a real Companies House scan** — validate before trusting
+  extracted values in production, and don't treat this as "fixed and
+  closed" until it's been run against actual messy filings.
 
-## 5. Frontend changes
+- **OCR engine replacement — researched, not decided, not built.** Current
+  `pytesseract`-based `ocr_extract.py` has no table/layout awareness at
+  all — it treats a page as flat lines of text, which is the structural
+  reason it can confuse a header cell for a data cell in the first place
+  (the bare-year fix above is a mitigation, not a cure). Two candidates
+  worth prototyping against real filings before picking one:
+  - **PaddleOCR (PP-OCRv6 / PP-StructureV2)** — mature, table-structure-aware
+    (`PP-Structure` identifies actual table cells, not just lines of text),
+    runs on CPU, meaningfully heavier install than pytesseract
+    (`paddleocr` + `paddlepaddle`, Dockerfile changes). This is the safer
+    default recommendation.
+  - **GLM-OCR (0.9B, GGUF)** — new in 2026, specifically claimed strong on
+    financial-document tables and small enough to run on a laptop CPU
+    (2–4GB RAM). Less battle-tested; claims are from third-party 2026
+    benchmarks, not independently verified against this project's actual
+    scanned filings.
+  Do not build a new extraction tier around either without first running
+  both against a handful of real scanned accounts and comparing actual
+  output, not benchmark claims.
 
-All new UI should reuse the existing `.panel`, `.metric-card`, `.data-num`, `Grade`, `Severity`, `Empty`, `Loading`, `ErrorCard` primitives already in `components.tsx` and `index.css` — do not introduce a second design system.
+## 5. Backend/DB — reprioritized toward client-visible value
 
-- **Vendor list/register**: add filter controls (by `risk_tier`, `latest_grade`, review status) and sort. Add a risk-tier badge component analogous to the existing `Grade` component but using tier semantics, not grade colors.
-- **Vendor detail page**: add an "Evidence" tab surfacing the new `evidence` table contents (news hits, sanctions matches) chronologically. Add a "Next review due" field near the existing grade/score display.
-- **Remediation task board**: new page or section under Alerts — list `remediation_tasks` grouped by status (open/in progress/resolved) with owner and due date visible, not just a flat alert list.
-- **Onboarding/review queue page**: new page listing `review_requests` with status `pending`, showing the reasons array, with Approve/Reject actions that call the existing `dashboard.decision()` — add a free-text field for the reviewer to edit/soften the rejection reason before it's sent to the vendor, rather than forwarding raw internal reason strings verbatim.
-- **Audit trail viewer**: ensure the existing Audit page is filterable by vendor/actor/date range, and make clear in the UI (e.g. a small badge or note) that entries are immutable, to build trust with a client reviewing the product.
-- **Reassessment calendar/queue**: a simple list or calendar view of vendors sorted by `next_review_due`, surfaced on the Overview page as a widget (upcoming due items) as well as its own page.
-- Update `src/types.ts` and `src/api.ts` to add the corresponding TS interfaces and `dashboard.*` methods for every new endpoint above, following the existing single-line style already used in those files.
-- Update `Layout.tsx` nav array to add entries for any new top-level pages (Review Queue, Remediation Tasks) if they don't fit naturally as tabs on existing pages.
+Original ordering here (tiering and governance first) was enterprise-TPRM
+sequencing that doesn't match an early-stage product's actual sales pitch.
+Reordered based on what SMB/startup vendor-compliance buyers actually cite
+as value versus what's structural scaffolding underneath it.
 
-## 6. n8n workflow changes
+### Priority 0 — Security fixes (do regardless of anything else)
+- `main.py::require_api_key` compares `x_internal_api_key != INTERNAL_API_KEY`
+  with a plain `!=` — timing side-channel on the internal API key. Replace
+  with `hmac.compare_digest(x_internal_api_key or "", INTERNAL_API_KEY)`,
+  matching what `dashboard_login` already does correctly two functions away.
+- `config.py`'s `DASHBOARD_SESSION_SECRET` fallback chain ends in the
+  hardcoded string `"local-dashboard-change-me"`. If the env var is unset,
+  the app should refuse to start with sessions enabled, not silently sign
+  cookies with a public string.
+- n8n has the internal API key hardcoded in plaintext across multiple HTTP
+  Request node parameters, already exposed via an exported JSON file. Move
+  to an n8n credential (HTTP Header Auth type), rotate the key.
+- Confirm `audit_logs` has no `UPDATE`/`DELETE` grant for the app's runtime
+  DB role at the database permission level — not just "nobody calls it" in
+  application code. Add the REVOKE + a rejecting trigger before describing
+  the audit trail as "immutable" to any client.
 
-- Add an `HTTP Request` node right after "Enhanced Review Request" email, POSTing to the new `/vendors/{id}/review-requests` endpoint.
-- Add a `Webhook` trigger node (new workflow or new trigger in the existing one) that fires when the backend's `/review-decisions` endpoint calls back. Branch on `decision == rejected` vs `approved`:
-  - Rejected → `Email Send` to the vendor's own contact email (confirm the intake form actually captures this field) with the reviewer-edited reason and the client's contact info for follow-up.
-  - Approved → `Email Send` welcome/next-steps to the vendor + `HTTP Request` to activate monitoring.
-- Add an `HTTP Request` node after the existing RSS/news correlation step, POSTing results to the new `/vendors/{id}/evidence` endpoint, in addition to (not instead of) the existing email.
-- Split the single nightly `Schedule Trigger` into tiered schedules (e.g. critical vendors every few hours, standard vendors nightly), each calling `/refresh-all?tier=...`.
-- Add a new scheduled workflow (e.g. daily) that queries vendors where `next_review_due` is within N days and emails a reassessment reminder to the internal team.
-- Add an offboarding workflow: manual trigger or form → `HTTP Request` to `/vendors/{id}/offboard` → final evidence/audit snapshot → vendor notification email.
-- **Security fix required regardless of the above**: the existing workflow has an internal API key hardcoded in plaintext across multiple `HTTP Request` node parameters. Move it into n8n's credential store (HTTP Header Auth credential type) and rotate the key on the backend, since it has already been exposed in an exported JSON file outside n8n.
+### Priority 1 — Real instant notifications
+Currently an `Alert` row is written on refresh/stream event, and nothing
+pushes it anywhere until n8n's *nightly batch* email. That's not "instant"
+by any reasonable definition and is the largest gap between what this
+product would be sold as and what it does today.
+- Backend: in `_open_alert()` (main.py), fire an outbound webhook/email
+  immediately for `severity in {"critical", "high"}` — separate from the
+  nightly digest, which stays for medium/low severity.
+- n8n: new `Webhook` trigger workflow for immediate delivery, distinct from
+  the existing nightly digest workflow.
+- DB: needs delivery tracking — a `notified_at`/`notification_channel` pair
+  on `Alert`, or a small `alert_notifications` table if per-channel delivery
+  tracking is wanted. Confirm with the client which channel(s) they
+  actually check, and whether preference is per-vendor or global, before
+  building either shape.
+
+### Priority 2 — Exportable compliance reports
+Nothing currently produces a file a client can hand to an auditor, insurer,
+or their own downstream client — the dashboard is read-only web UI only.
+- `GET /dashboard/vendors/{id}/report.pdf` — single-vendor report: score/
+  grade, factor breakdown, financial evidence summary, alert history, audit
+  excerpt. Build via the PDF skill, not a hand-rolled PDF library.
+- `GET /dashboard/audit-logs/export.csv` — filterable audit log export.
+- This is the artifact a compliance officer actually forwards upward. Ships
+  before tiering, not after.
+
+### Priority 3 — Lightweight risk tiering
+Validated as real, not vanity: it's the standard mechanism for preventing
+alert fatigue at scale once Priority 1 exists, not a feature that competes
+with notifications for engineering time. Ship the minimal version:
+- DB: `risk_tier` enum (`critical | high | medium | low`) on `vendors`,
+  nullable, no automatic backfill logic without a confirmed policy for
+  which intake fields determine it.
+- Backend: `GET /dashboard/vendors?tier=critical` filter.
+- Defer `next_review_due` + reassessment-cadence automation until a cadence
+  policy is actually approved — don't build a calendar engine around
+  numbers nobody signed off on.
+
+### Priority 4 — Remediation tracking
+Closes the loop on alerts — "we got an alert" becomes "we can prove we did
+something about it," which is the audit-trail value clients actually want.
+- DB: `remediation_tasks` table — `id, alert_id, vendor_id, owner, status
+  (open|in_progress|resolved), due_date, resolution_notes, created_at,
+  updated_at`.
+- Backend: `PATCH /dashboard/alerts/{id}/remediation`.
+
+### Priority 5 — Defer until a specific client's workflow requires them
+Governance-department features for a product that doesn't have a governance
+department yet. Build when required, not speculatively:
+- `review_requests` table + onboarding review queue UI
+- Offboarding workflow (`status`, `offboarded_at`, `offboarding_reason` on `vendors`)
+- Separate `evidence` table for news/sanctions RSS persistence (currently
+  only emailed by n8n, not persisted anywhere queryable)
+- Webhook loop-closing from review-decision back to n8n vendor-facing emails
+- Tiered refresh scheduling (`/refresh-all?tier=critical`) — depends on
+  Priority 3 existing first
+
+## 6. Frontend — dashboard blueprint
+
+Reuse existing primitives (`Grade`, `Severity`, `IconMetric`, `Empty`,
+`Loading`, `ErrorCard`, `.panel`/`.metric-card`/`.data-num` classes) — no
+second design system.
+
+**Overview**
+- Existing: 4 metric cards, grade distribution bar chart, top-6 open-alert list
+- Add: "due for reassessment" widget (needs `next_review_due`, if tiering cadence ships)
+- Add: "awaiting remediation" count card (Priority 4)
+- Add: notification delivery status strip — proves Priority 1 actually works
+- Add: portfolio-average score trend line (aggregate existing per-vendor `score_history`)
+
+**Vendors (register)**
+- Existing: search + flat table
+- Add: tier badge column + filter row (tier / grade / review status)
+- Add: bulk action bar (select → refresh, export)
+- Add: proper empty state for a first-time client with zero vendors
+
+**Vendor Detail**
+- Existing: Overview / Onboarding / Companies House / Sanctions / Alerts /
+  Financial evidence / Review & audit tabs
+- Add: tier badge + "next review due" near the score header
+- Add: **Reports tab** — download-PDF button (Priority 2)
+- Add: **Remediation tab** — open/in-progress/resolved tasks for this
+  vendor's alerts, owner + due date visible
+- Add: notification delivery log inside the Alerts tab (delivered at X,
+  viewed at Y — not just an acknowledge button)
+- Financial evidence tab: add a UI form for `POST /vendors/{id}/override` —
+  the backend already supports client corrections to extracted financial
+  values, there's currently no UI for it, only direct API access
+
+**Alerts**
+- Existing: flat list, single page
+- Split into open queue vs remediation board (Kanban: open → in progress →
+  resolved), per Priority 4
+- Add severity + tier combined filter/sort
+
+**Audit**
+- Existing: flat chronological list
+- Add filter bar: vendor / actor / date range
+- Add an "immutable" badge only once the DB-level trigger from Priority 0
+  is actually in place — don't claim it before it's real
+- Add CSV export button (Priority 2)
+
+**New: Reports page**
+- Central list of generated PDFs per vendor, regenerate/download — the
+  screenshot-able proof of value for a client showing their own boss
 
 ## 7. Non-functional requirements
 
-- Every new backend endpoint must require the same authentication already enforced on `/dashboard/*` routes.
-- Do not remove or rename any existing field on `Vendor`, `Alert`, `AuditEvent`, `Evidence`, `Decision`, or `Detail` — only add.
-- Every new table needs `created_at` at minimum; audit-relevant tables (`evidence`, `remediation_tasks`, `review_requests`) should also track who/what triggered the row (`actor` or `source` field).
-- The audit log's append-only guarantee must be enforced at the database permission level, not only in application code — a bug in the backend should not be able to silently violate it.
-- Confirm before hardcoding: exact reassessment cadence per tier, and which intake fields determine initial `risk_tier` — these should come from the project owner's actual policy, not be invented.
+- Every new backend endpoint requires the same auth already enforced on
+  `/dashboard/*` routes.
+- Do not remove or rename any existing field on `Vendor`, `Alert`,
+  `AuditEvent`, `Evidence`, `Decision`, or `Detail` — only add.
+- Every new table needs `created_at` at minimum; audit-relevant tables
+  (`remediation_tasks`, any future `evidence`/`review_requests`) should also
+  track who/what triggered the row.
+- The audit log's append-only guarantee must be enforced at the database
+  permission level, not only in application code.
+- Confirm before hardcoding: exact reassessment cadence per tier, which
+  intake fields determine initial `risk_tier`, and which notification
+  channel(s) a client actually wants — these come from the client's actual
+  policy/preference, not an invented default.
 
 ## 8. Suggested implementation order
 
-1. Database migrations (Section 3) — everything else depends on these existing first.
-2. Backend endpoints (Section 4).
-3. n8n `HTTP Request` nodes that persist data to the new endpoints (Section 6, evidence + review-requests first — these are additive and low-risk).
-4. Frontend read-only views of the new data (evidence tab, review queue list, remediation board) — ship visibility before ship interactivity.
-5. Frontend write actions (approve/reject, remediation status updates) wired to the backend endpoints.
-6. n8n webhook loop-closing (review decision → vendor email) and tiered scheduling — these depend on both backend and frontend being in place.
-7. Offboarding flow last — it's the least urgent and touches every layer.
+1. Priority 0 security fixes — no dependencies, do first regardless of anything else.
+2. Validate the `amount_parse.py` fix against real filings; run the PaddleOCR/GLM-OCR prototype comparison.
+3. Priority 1 (instant notifications) — biggest client-visible gap.
+4. Priority 2 (exportable reports).
+5. Priority 3 (lightweight tiering) — only the DB column + filter, not the cadence engine.
+6. Priority 4 (remediation tracking).
+7. Frontend blueprint items, in the same order as their backing features land.
+8. Priority 5 items — only if/when a specific client's workflow requires them.
 
-Confirm each layer builds/type-checks/deploys cleanly before moving to the next. Do not attempt all seven steps in a single pass.
+Confirm each layer builds/type-checks/deploys cleanly before moving to the
+next. Do not attempt everything in a single pass.
