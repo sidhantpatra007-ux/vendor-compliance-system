@@ -22,7 +22,7 @@ jobs:
       DATABASE_URL: "sqlite:///:memory:"
       INTERNAL_API_KEY: ci
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -38,7 +38,7 @@ jobs:
       run:
         working-directory: vendor-dashboard
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -52,7 +52,7 @@ jobs:
     name: Repository hygiene
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: n8n workflows are valid JSON and contain no hard-coded key
         run: |
           for f in n8n/workflows/*.json; do python -m json.tool "$f" > /dev/null; done
