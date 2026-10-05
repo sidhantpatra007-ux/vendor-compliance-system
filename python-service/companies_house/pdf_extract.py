@@ -255,7 +255,7 @@ def download_accounts_pdf(company_number: str) -> Optional[str]:
         return tmp.name
 
 
-def extract_candidates_from_pdf(company_number: str, pdf_path: Optional[str]) -> dict:
+def extract_candidates_from_pdf(company_number: str, pdf_path: Optional[str], evidence_set: str = None) -> dict:
     """
     Returns extraction candidates for a PDF-only accounts filing:
 
@@ -329,6 +329,11 @@ def extract_candidates_from_pdf(company_number: str, pdf_path: Optional[str]) ->
                             "raw_line": line.strip(),
                             "page": page_num,
                             "needs_manual_review": True,
+                            "validation": {
+                                "label_matched": True,
+                                "single_value": extracted["state"] in {"PRESENT", "NIL"},
+                                "financial_page": True,
+                            },
                             "evidence_image_base64": None,
                             "evidence_saved_path": None,
                         }
@@ -339,7 +344,7 @@ def extract_candidates_from_pdf(company_number: str, pdf_path: Optional[str]) ->
     pages_with_matches = {v["page"] for v in results.values() if v["page"] is not None}
     evidence_by_page = {}
     for page_num in pages_with_matches:
-        evidence = capture_from_pdfplumber_page(company_number, pdf_path, page_num)
+        evidence = capture_from_pdfplumber_page(company_number, pdf_path, page_num, evidence_set=evidence_set)
         if evidence:
             evidence_by_page[page_num] = evidence
 

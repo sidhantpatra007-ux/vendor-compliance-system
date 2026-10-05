@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python-service
+    env:
+      # config.py raises at import time without these; dummy values are fine for unit tests.
+      COMPANIES_HOUSE_API_KEY: ci
+      GEMINI_API_KEY: ci
+      DATABASE_URL: "sqlite:///:memory:"
+      INTERNAL_API_KEY: ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: python-service/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+
+  dashboard:
+    name: Dashboard test and build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: vendor-dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: vendor-dashboard/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+  hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: n8n workflows are valid JSON and contain no hard-coded key
+        run: |
+          for f in n8n/workflows/*.json; do python -m json.tool "$f" > /dev/null; done
+          if grep -rIiE 'x-internal-api-key["'"'"' :=]+[A-Za-z0-9_-]{12,}' n8n/workflows; then
+            echo "Hard-coded API key found in an n8n workflow"; exit 1
+          fi
+      - name: docker-compose.yml is valid
+        run: |
+          cp python-service/.env.example python-service/.env
+          docker compose config -q

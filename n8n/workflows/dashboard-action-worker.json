@@ -1,0 +1,522 @@
+{
+  "name": "Dashboard action worker",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -560,
+        96
+      ],
+      "id": "0ca0c8ae-7227-4b4e-b3d9-d456c6cb8db7",
+      "name": "Dashboard job schedule"
+    },
+    {
+      "parameters": {
+        "url": "http://python-service:8000/automation-jobs?status=pending&limit=25",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -352,
+        96
+      ],
+      "id": "9c2aacc9-ec38-44e7-b10e-3bd5b734fd56",
+      "name": "Claim pending jobs",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const type = String($json.job_type || '').toLowerCase();\nif (!['bulk_onboard', 'send_questionnaire', 'email_report'].includes(type)) throw new Error(`Unsupported dashboard job type: ${type}`);\nreturn { json: { ...$json, route: type } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -128,
+        96
+      ],
+      "id": "331e7ffb-45cf-4571-9e23-1860e8c77563",
+      "name": "Route dashboard job",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "bulk_onboard",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "bulk_onboard"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "send_questionnaire",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "send_questionnaire"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.route }}",
+                    "rightValue": "email_report",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "email_report"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        96,
+        96
+      ],
+      "id": "48ef6e3f-1155-4d95-add3-880a8d4d621e",
+      "name": "Select job worker"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://python-service:8000/vendors/bulk-onboard",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ companies: $json.companies }) }}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        336,
+        -96
+      ],
+      "id": "612d92e9-2804-4943-931f-d5ceff6186b6",
+      "name": "Bulk onboard companies",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Header Auth account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const job = $('Route dashboard job').item.json;\nconst esc = value => String(value ?? '').replace(/[&<>\"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[char]));\nconst fields = (job.requested_fields || []).map(field => `<li>${esc(field.replaceAll('_', ' '))}</li>`).join('');\nreturn { json: { subject: `Information request — ${job.vendor_name}`, html: `<p>Hello ${esc(job.recipient_name || '')},</p><p>Please complete the requested due-diligence information for <strong>${esc(job.vendor_name)}</strong>.</p><ul>${fields}</ul>${job.message ? `<p>${esc(job.message)}</p>` : ''}<p><a href=\"${esc(job.questionnaire_url)}\">Open questionnaire</a></p><p>This link expires on ${esc(job.expires_at)}.</p>` } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        336,
+        96
+      ],
+      "id": "97b43f71-35db-4128-a9ba-e7439e7bd29f",
+      "name": "Build questionnaire email",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "fromEmail": "REPLACE_WITH_APPROVED_SENDER_EMAIL",
+        "toEmail": "={{ $('Route dashboard job').item.json.recipient_email }}",
+        "subject": "={{ $json.subject }}",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        576,
+        96
+      ],
+      "id": "9ad27f72-364a-4172-9abc-a427998dde3e",
+      "name": "Send questionnaire email",
+      "credentials": {
+        "smtp": {
+          "name": "SMTP account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "url": "={{ 'http://python-service:8000/vendors/' + $('Route dashboard job').item.json.vendor_id + '/reports/' + $('Route dashboard job').item.json.report_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        336,
+        272
+      ],
+      "id": "201823f8-4d60-4822-8e5c-69149d8594b8",
+      "name": "Get immutable report",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Header Auth account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const job = $('Route dashboard job').item.json;\nconst report = $json.payload || {};\nconst vendor = report.vendor || {};\nconst risk = report.current_risk || {};\nconst esc = value => String(value ?? '').replace(/[&<>\"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[char]));\nreturn { json: { subject: `Company audit report — ${vendor.display_name || job.vendor_name}`, html: `<h2>Company audit report</h2><p><strong>${esc(vendor.display_name || job.vendor_name)}</strong><br>Company number: ${esc(vendor.company_number || '')}</p><p>Score: ${esc(risk.overall_score ?? 'Unassessed')} · Grade: ${esc(risk.overall_grade ?? 'Unassessed')} · Status: ${esc(risk.overall_status ?? 'Unknown')}</p><p>This immutable report was generated by the monitoring system. Verify source evidence and apply human judgement before an adverse business decision.</p>` } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        576,
+        272
+      ],
+      "id": "45d6983f-6e44-415b-88c4-7041d83abd8f",
+      "name": "Build report email",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "fromEmail": "REPLACE_WITH_APPROVED_SENDER_EMAIL",
+        "toEmail": "={{ $('Route dashboard job').item.json.recipient_email }}",
+        "subject": "={{ $json.subject }}",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        816,
+        272
+      ],
+      "id": "129dbdcc-7d28-4789-b126-f2fc1d569941",
+      "name": "Send report email",
+      "credentials": {
+        "smtp": {
+          "name": "SMTP account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://python-service:8000/automation-jobs/' + $('Route dashboard job').item.json.job_id + '/complete' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ actor: 'n8n', claim_token: $('Route dashboard job').item.json.claim_token, result: $json }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1072,
+        96
+      ],
+      "id": "b407770f-3822-4a65-8ded-89b532e3062c",
+      "name": "Complete dashboard job",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://python-service:8000/automation-jobs/' + $('Route dashboard job').item.json.job_id + '/fail' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ actor: 'n8n', claim_token: $('Route dashboard job').item.json.claim_token, error: $json.error?.message || $json.message || 'Worker step failed' }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        336,
+        464
+      ],
+      "id": "30023cb0-bd2c-463b-95a7-7a6007a80bee",
+      "name": "Fail dashboard job",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Header Auth account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Dashboard job schedule": {
+      "main": [
+        [
+          {
+            "node": "Claim pending jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim pending jobs": {
+      "main": [
+        [
+          {
+            "node": "Route dashboard job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route dashboard job": {
+      "main": [
+        [
+          {
+            "node": "Select job worker",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail dashboard job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select job worker": {
+      "main": [
+        [
+          {
+            "node": "Bulk onboard companies",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build questionnaire email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get immutable report",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail dashboard job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bulk onboard companies": {
+      "main": [
+        [
+          {
+            "node": "Complete dashboard job",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail dashboard job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build questionnaire email": {
+      "main": [
+        [
+          {
+            "node": "Send questionnaire email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail dashboard job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send questionnaire email": {
+      "main": [
+        [
+          {
+            "node": "Complete dashboard job",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail dashboard job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get immutable report": {
+      "main": [
+        [
+          {
+            "node": "Build report email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail dashboard job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build report email": {
+      "main": [
+        [
+          {
+            "node": "Send report email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail dashboard job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send report email": {
+      "main": [
+        [
+          {
+            "node": "Complete dashboard job",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fail dashboard job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "tags": []
+}

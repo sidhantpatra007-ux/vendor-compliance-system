@@ -195,4 +195,9 @@ def screen(request: ScreenRequest) -> dict:
             "score": round(score, 2) if score >= 0 else None,
             "candidate": candidate,
         })
-    return {"list_version": current["list_version"], "list_fetched_at": current["fetched_at"], "results": results}
+    return {
+        "source_url": current["source_url"],
+        "list_version": current["list_version"],
+        "list_fetched_at": current["fetched_at"],
+        "results": results,
+    }

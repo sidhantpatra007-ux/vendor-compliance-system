@@ -1,5 +1,5 @@
 import os
-import uuid
+import hashlib
 from datetime import datetime, timezone
 
 from companies_house.client import (
@@ -18,6 +18,7 @@ from companies_house.parser import (
     count_recent_resignations,
     parse_active_officers,
     parse_active_pscs,
+    parse_psc_quality,
     parse_charge_signals,
     parse_insolvency_signals,
     parse_recent_late_filing_signal,
@@ -49,25 +50,34 @@ _SIGNAL_TO_CONCEPT = {
 
 
 def _best_candidate_per_concept(pdf_extraction, ocr_extraction):
-    candidates = {}
+    grouped = {}
 
     if pdf_extraction and isinstance(pdf_extraction, dict):
         for concept, data in pdf_extraction.get("concepts", {}).items():
             if data.get("state") in ("PRESENT", "AMBIGUOUS_MULTIPLE_VALUES", "NIL"):
-                candidates[concept] = {**data, "concept": concept, "source_tier": "pdf_text"}
+                grouped.setdefault(concept, []).append({**data, "concept": concept, "source_tier": "pdf_text"})
 
     if ocr_extraction and isinstance(ocr_extraction, list):
         for data in ocr_extraction:
             concept = data.get("concept")
-            if concept in candidates:
-                continue
             if data.get("state") in ("PRESENT", "AMBIGUOUS_MULTIPLE_VALUES", "NIL"):
-                candidates[concept] = {**data, "source_tier": "ocr"}
+                grouped.setdefault(concept, []).append({**data, "source_tier": "ocr"})
 
-    return candidates
+    def rank(item):
+        state = {"PRESENT": 3, "NIL": 3, "AMBIGUOUS_MULTIPLE_VALUES": 1}.get(item.get("state"), 0)
+        source = 1 if item.get("source_tier") == "pdf_text" else 0
+        confidence = float(item.get("ocr_confidence") or 0) / 100
+        return state, source, confidence, item.get("page_financial_score") or 0
+
+    return {concept: max(rows, key=rank) for concept, rows in grouped.items()}
 
 
 def _candidate_is_usable(candidate: dict) -> bool:
+    validation = candidate.get("validation") or {}
+    if not validation.get("label_matched") or not validation.get("single_value"):
+        return False
+    if candidate.get("source_tier") == "ocr" and not validation.get("financial_page"):
+        return False
     if candidate.get("state") == "NIL":
         return True
     if candidate.get("state") != "PRESENT" or candidate.get("value") is None:
@@ -187,6 +197,8 @@ def _data_quality(signals: dict) -> dict:
         issues.append("financial_metrics_from_document_extraction")
     if signals.get("director_or_psc_sanctions_review_required"):
         issues.append("people_sanctions_review_required")
+    if signals.get("psc_details_unclear"):
+        issues.append("psc_details_unclear")
     return {
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "sanctions_list_fetched_at": signals.get("sanctions_list_fetched_at"),
@@ -208,6 +220,7 @@ def evaluate_company(company_number: str) -> dict:
     recent_resignations = count_recent_resignations(officers_raw)
     active_officers = parse_active_officers(officers_raw)
     active_pscs = parse_active_pscs(pscs_raw)
+    psc_quality = parse_psc_quality(pscs_raw, active_pscs)
     disqualified_names = _disqualified_officer_names(active_officers)
 
     financial_signals = extract_financial_signals(company_number)
@@ -227,6 +240,15 @@ def evaluate_company(company_number: str) -> dict:
         for subject, result in zip(screening_subjects[1:], screening_results[1:])
         if result.get("sanctions_match") or result.get("sanctions_review_required")
     ]
+    people_match_states = {match.get("sanctions_match_state") for match in people_sanctions_matches}
+    if "CONFIRMED_MATCH" in people_match_states:
+        people_match_state = "CONFIRMED_MATCH"
+    elif "REVIEW_REQUIRED" in people_match_states:
+        people_match_state = "REVIEW_REQUIRED"
+    elif "POSSIBLE_MATCH" in people_match_states:
+        people_match_state = "POSSIBLE_MATCH"
+    else:
+        people_match_state = "NO_MATCH"
 
     signals = {
         **overdue_flags,
@@ -240,10 +262,12 @@ def evaluate_company(company_number: str) -> dict:
         "active_pscs": active_pscs,
         "active_officer_count": len(active_officers),
         "active_psc_count": len(active_pscs),
+        **psc_quality,
         "disqualified_officer_names": disqualified_names,
         "has_disqualified_officer": bool(disqualified_names),
         "people_sanctions_matches": people_sanctions_matches,
-        "director_or_psc_sanctions_match": any(match.get("sanctions_match") for match in people_sanctions_matches),
+        "director_or_psc_sanctions_match": people_match_state == "CONFIRMED_MATCH",
+        "director_or_psc_sanctions_match_state": people_match_state,
         "director_or_psc_sanctions_review_required": any(match.get("sanctions_review_required") for match in people_sanctions_matches),
         **financial_signals,
         **sanctions_signals,
@@ -251,11 +275,16 @@ def evaluate_company(company_number: str) -> dict:
     pdf_extraction = None
     ocr_extraction = None
     pdf_path = None
-    evidence_set = uuid.uuid4().hex
+    financial_document_hash = None
+    evidence_set = "latest"
 
     if not financial_signals.get("financial_scoring_available"):
         try:
             pdf_path = download_accounts_pdf(company_number)
+            if pdf_path:
+                with open(pdf_path, "rb") as source_file:
+                    financial_document_hash = hashlib.sha256(source_file.read()).hexdigest()
+                evidence_set = f"filing-{financial_document_hash[:16]}"
             pdf_extraction = extract_candidates_from_pdf(company_number, pdf_path, evidence_set=evidence_set)
         except Exception as e:
             pdf_extraction = {
@@ -283,6 +312,10 @@ def evaluate_company(company_number: str) -> dict:
     if pdf_path is None:
         try:
             pdf_path = download_accounts_pdf(company_number)
+            if pdf_path:
+                with open(pdf_path, "rb") as source_file:
+                    financial_document_hash = hashlib.sha256(source_file.read()).hexdigest()
+                evidence_set = f"filing-{financial_document_hash[:16]}"
         except Exception:
             pdf_path = None
     filing_evidence_pages = capture_all_pdf_pages(company_number, pdf_path, evidence_set) if pdf_path else []
@@ -330,6 +363,8 @@ def evaluate_company(company_number: str) -> dict:
                 "matched_text": data.get("matched_keyword"),
                 "raw_line": data.get("raw_line"),
                 "page": data.get("page"),
+                "ocr_confidence": data.get("ocr_confidence"),
+                "validation": data.get("validation"),
                 "evidence_image_base64": data.get("evidence_image_base64"),
                 "evidence_saved_path": data.get("evidence_saved_path"),
                 "client_edited": data.get("client_edited", False),
@@ -350,6 +385,7 @@ def evaluate_company(company_number: str) -> dict:
         "extracted_financial_summary": extracted_financial_summary,
         "reference_filing_snapshot": None,
         "filing_evidence_pages": filing_evidence_pages,
+        "financial_document_hash": financial_document_hash,
         "recommend_manual_review": recommend_manual_review,
         **result,
     }
