@@ -9,6 +9,6 @@
     "preview": "vite preview --configLoader native --host 127.0.0.1 --port 4173 --strictPort",
     "test": "node --test tests/*.test.mjs"
   },
-  "dependencies": {"react": "19.1.1", "react-dom": "19.1.1"},
+  "dependencies": {"react": "19.3.0", "react-dom": "19.1.1"},
   "devDependencies": {"vite": "^7.1.5", "@vitejs/plugin-react": "^5.0.3"}
 }
