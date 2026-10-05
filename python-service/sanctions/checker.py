@@ -28,9 +28,15 @@ def check_sanctions_subjects(subjects: list[dict]) -> list[dict]:
     except (httpx.HTTPError, ValueError) as exc:
         return [{
             "sanctions_match": False,
+            "sanctions_match_state": "UNAVAILABLE",
             "sanctions_match_name": None,
             "sanctions_match_score": None,
             "sanctions_match_unique_id": None,
+            "sanctions_candidate_name": None,
+            "sanctions_candidate_unique_id": None,
+            "sanctions_candidate_alias": None,
+            "sanctions_matching_fields": [],
+            "sanctions_source_url": None,
             "sanctions_checked_at": checked_at,
             "sanctions_screening_available": False,
             "sanctions_screening_error": str(exc),
@@ -42,24 +48,42 @@ def check_sanctions_subjects(subjects: list[dict]) -> list[dict]:
     results = []
     for result in payload.get("results") or []:
         candidate = result.get("candidate") or {}
+        if result.get("matched"):
+            state = "REVIEW_REQUIRED"
+        elif result.get("review_required"):
+            state = "POSSIBLE_MATCH"
+        else:
+            state = "NO_MATCH"
         results.append({
-            "sanctions_match": bool(result.get("matched")),
-            "sanctions_match_name": candidate.get("matched_name") if result.get("matched") else None,
+            "sanctions_match": False,
+            "sanctions_match_state": state,
+            "sanctions_match_name": None,
             "sanctions_match_score": result.get("score"),
-            "sanctions_match_unique_id": candidate.get("unique_id") if result.get("matched") else None,
+            "sanctions_match_unique_id": None,
+            "sanctions_candidate_name": candidate.get("matched_name") if state != "NO_MATCH" else None,
+            "sanctions_candidate_unique_id": candidate.get("unique_id") if state != "NO_MATCH" else None,
+            "sanctions_candidate_alias": None,
+            "sanctions_matching_fields": ["name"] if state != "NO_MATCH" else [],
+            "sanctions_source_url": payload.get("source_url"),
             "sanctions_checked_at": checked_at,
             "sanctions_screening_available": True,
             "sanctions_screening_error": None,
             "sanctions_list_version": payload.get("list_version"),
             "sanctions_list_fetched_at": payload.get("list_fetched_at"),
-            "sanctions_review_required": bool(result.get("review_required")),
+            "sanctions_review_required": state in {"POSSIBLE_MATCH", "REVIEW_REQUIRED"},
         })
     if len(results) != len(subjects):
         return [{
             "sanctions_match": False,
+            "sanctions_match_state": "UNAVAILABLE",
             "sanctions_match_name": None,
             "sanctions_match_score": None,
             "sanctions_match_unique_id": None,
+            "sanctions_candidate_name": None,
+            "sanctions_candidate_unique_id": None,
+            "sanctions_candidate_alias": None,
+            "sanctions_matching_fields": [],
+            "sanctions_source_url": payload.get("source_url"),
             "sanctions_checked_at": checked_at,
             "sanctions_screening_available": False,
             "sanctions_screening_error": "Sanctions service returned an incomplete result set",

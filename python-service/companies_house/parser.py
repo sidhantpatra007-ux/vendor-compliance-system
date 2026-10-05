@@ -93,10 +93,22 @@ def parse_active_officers(raw: dict) -> list[dict]:
 def parse_active_pscs(raw: dict) -> list[dict]:
     raw = raw or {}
     return [
-        {"name": item.get("name"), "kind": item.get("kind")}
+        {
+            "name": item.get("name"),
+            "kind": item.get("kind"),
+            "natures_of_control": item.get("natures_of_control") or [],
+            "notified_on": item.get("notified_on"),
+        }
         for item in raw.get("items", []) or []
         if isinstance(item, dict) and item.get("name") and not item.get("ceased_on")
     ]
+
+
+def parse_psc_quality(raw: dict, active_pscs: list[dict]) -> dict:
+    if not isinstance(raw, dict) or "items" not in raw:
+        return {"psc_data_available": False, "psc_details_unclear": True}
+    unclear = any(not item.get("natures_of_control") for item in active_pscs)
+    return {"psc_data_available": True, "psc_details_unclear": unclear}
 
 
 def parse_charge_signals(raw: dict) -> dict:

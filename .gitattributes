@@ -1,0 +1,23 @@
+# Normalise line endings: LF in the repository, regardless of OS.
+* text=auto eol=lf
+
+# Windows-only scripts must keep CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files: never diff / convert
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.sqlite binary
+*.db binary
+
+# Collapse generated files in GitHub diffs and language stats
+package-lock.json linguist-generated=true
+n8n/workflows/*.json linguist-generated=true

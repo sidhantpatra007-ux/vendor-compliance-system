@@ -1,0 +1,761 @@
+{
+  "name": "1. company onboarding intake and daily monitoring",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "New Vendor Onboarding",
+        "formDescription": "Submit accurate business details for automated screening and human compliance review. Submission does not constitute company approval.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Company number",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Legal company name",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Trading name ( if different)"
+            },
+            {
+              "fieldLabel": "Registered street address"
+            },
+            {
+              "fieldLabel": "Registered city"
+            },
+            {
+              "fieldLabel": "Registered postcode"
+            },
+            {
+              "fieldLabel": "Company website"
+            },
+            {
+              "fieldLabel": "Primary contact name"
+            },
+            {
+              "fieldLabel": "Primary contact email"
+            },
+            {
+              "fieldLabel": "Supplier category",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "IT/ software"
+                  },
+                  {
+                    "option": "Professional services"
+                  },
+                  {
+                    "option": "Goods/ materials "
+                  },
+                  {
+                    "option": "Facilities/maintenence"
+                  },
+                  {
+                    "option": "Logistics/transport"
+                  },
+                  {
+                    "option": "Marketing/creative"
+                  },
+                  {
+                    "option": "Financial/legal services"
+                  },
+                  {
+                    "option": "Other "
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Goods or services provided ( Short description)",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Client-assessed supplier criticality         ",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Low"
+                  },
+                  {
+                    "option": "Medium "
+                  },
+                  {
+                    "option": "High"
+                  },
+                  {
+                    "option": "Critical"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Estimated annual spend",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Under £10,000"
+                  },
+                  {
+                    "option": "£10,000–£50,000"
+                  },
+                  {
+                    "option": "£50,000–£200,000"
+                  },
+                  {
+                    "option": "Over £250,000"
+                  },
+                  {
+                    "option": "Unknown"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Access to client systems or data",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "YES"
+                  },
+                  {
+                    "option": "NO"
+                  },
+                  {
+                    "option": "Unknown"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Processes personal data",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "YES "
+                  },
+                  {
+                    "option": "NO"
+                  },
+                  {
+                    "option": "Unknown"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Delivery countries",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "United Kingdom"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Uses subcontractors",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "YES "
+                  },
+                  {
+                    "option": "NO"
+                  },
+                  {
+                    "option": "Unknown"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Supplier declaration ",
+              "fieldType": "checkbox",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "I confirm that the supplied information is accurate and that the supplier may be subject to periodic compliance monitoring."
+                  }
+                ]
+              },
+              "requiredField": true
+            }
+          ]
+        },
+        "responseMode": "lastNode",
+        "options": {
+          "respondWithOptions": {
+            "values": {
+              "formSubmittedText": "Submission received successfully. The company has been sent for assessment."
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        -1616,
+        144
+      ],
+      "id": "adb20db2-1239-4267-9b10-fd4323f8e87c",
+      "name": "New Company Due-Diligence Intake"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ (() => {\n  const form = $json;\n  const pick = (...names) => {\n    const key = Object.keys(form).find((candidate) => names.some((name) => candidate.trim().toLowerCase() === name.trim().toLowerCase()));\n    return key ? form[key] : undefined;\n  };\n  const declaration = pick(\"Supplier declaration\", \"Supplier declaration accepted\");\n  return {\n    company_number: pick(\"Company number\"),\n    display_name: pick(\"Legal company name\"),\n    trading_name: pick(\"Trading name ( if different)\"),\n    vendor_category: pick(\"Supplier category\"),\n    goods_or_services: pick(\"Goods or services provided ( Short description)\"),\n    supplier_criticality: pick(\"Client-assessed supplier criticality\"),\n    annual_spend_band: pick(\"Estimated annual spend\"),\n    access_to_client_systems_or_data: pick(\"Access to client systems or data\"),\n    processes_personal_data: pick(\"Processes personal data\"),\n    delivery_countries: pick(\"Delivery countries\"),\n    uses_subcontractors: pick(\"Uses subcontractors\"),\n    supplier_declaration_accepted: declaration === true || String(declaration ?? \"\").trim().toLowerCase() === \"true\",\n    contact_name: pick(\"Primary contact name\"),\n    contact_email: pick(\"Primary contact email\"),\n    address_street: pick(\"Registered street address\"),\n    address_city: pick(\"Registered city\"),\n    address_postcode: pick(\"Registered postcode\"),\n    company_website: pick(\"Company website\")\n  };\n})() }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -1392,
+        144
+      ],
+      "id": "665d2efe-fa2c-4130-96e6-54a5f7eacdea",
+      "name": "Map existing intake fields"
+    },
+    {
+      "parameters": {
+        "jsCode": "const clean = {};\nfor (const [key, value] of Object.entries($json)) {\n  if (value === undefined || value === null) continue;\n  if (typeof value === 'string') { const trimmed = value.trim(); if (trimmed) clean[key] = trimmed; }\n  else clean[key] = value;\n}\nreturn { json: clean };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1184,
+        144
+      ],
+      "id": "73db0c2f-6727-44da-8056-6fd0cc56c48c",
+      "name": "Remove empty answers"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://python-service:8000/vendors/onboard",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -944,
+        144
+      ],
+      "id": "362072e4-e3a7-493b-8996-99b09cccb4ca",
+      "name": "Create and screen company",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Header Auth account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const intake = $('Remove empty answers').item.json;\nconst record = { ...intake, ...$json };\nconst factors = Array.isArray(record.factors) ? record.factors : [];\nconst text = (value) => String(value ?? '').trim().toLowerCase();\nconst yes = (value) => value === true || ['true', 'yes'].includes(text(value));\nconst highImpact = ['high', 'critical'].includes(text(record.supplier_criticality));\nconst critical = factors.find((factor) => factor?.severity === 'critical');\nconst reasons = [];\nif (record.duplicate) reasons.push('An existing company record was refreshed; no duplicate was created');\nif (record.recommend_manual_review) reasons.push('Automated screening requires human review');\nif (highImpact) reasons.push(`Supplier criticality: ${record.supplier_criticality}`);\nif (yes(record.access_to_client_systems_or_data)) reasons.push('Company will access client systems or data');\nif (yes(record.processes_personal_data)) reasons.push('Company will process personal data');\nif (yes(record.uses_subcontractors)) reasons.push('Company uses subcontractors');\nlet route = 'STANDARD_REVIEW';\nlet severity = 'low';\nif (critical) { route = 'BLOCKED'; severity = 'critical'; reasons.unshift(critical.description || 'Critical screening condition detected'); }\nelse if (reasons.length) { route = 'REVIEW_REQUIRED'; severity = 'medium'; }\nreturn { json: { ...record, route, onboarding_severity: severity, onboarding_reasons: reasons } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -720,
+        48
+      ],
+      "id": "8dbcbbdc-2503-4600-8d8b-b02d6866dab9",
+      "name": "Classify onboarding route"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "BLOCKED",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -480,
+        48
+      ],
+      "id": "5571c2d7-3753-4260-ba86-99071d87c989",
+      "name": "Is blocked?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.route }}",
+              "rightValue": "REVIEW_REQUIRED",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -256,
+        176
+      ],
+      "id": "8a49ad51-cc52-482a-b3e6-44939730968d",
+      "name": "Needs enhanced review?"
+    },
+    {
+      "parameters": {
+        "fromEmail": "REPLACE_WITH_APPROVED_SENDER_EMAIL",
+        "toEmail": "REPLACE_WITH_ALERT_RECIPIENT_EMAIL",
+        "subject": "=CRITICAL: Company onboarding blocked — {{ $json.vendor_name }}",
+        "html": "=<h2>Critical onboarding escalation</h2><p><strong>Company:</strong> {{ $json.vendor_name }}<br><strong>Company number:</strong> {{ $json.company_number }}<br><strong>Score:</strong> {{ $json.composite_score }}/100 ({{ $json.risk_grade }})</p><h3>Why review is required</h3><ul>{{ ($json.onboarding_reasons || []).map(x => `<li>${x}</li>`).join('') }}</ul><p><em>Automated screening supports human review; it is not an approval or adverse-action decision.</em></p>",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        -16,
+        -48
+      ],
+      "id": "914de383-aaf6-4f57-8452-efab847e2c19",
+      "name": "Send blocked escalation",
+      "credentials": {
+        "smtp": {
+          "name": "SMTP account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "REPLACE_WITH_APPROVED_SENDER_EMAIL",
+        "toEmail": "REPLACE_WITH_ALERT_RECIPIENT_EMAIL",
+        "subject": "=Review required: {{ $json.vendor_name }} onboarding",
+        "html": "=<h2>Company onboarding review required</h2><p><strong>Company:</strong> {{ $json.vendor_name }}<br><strong>Company number:</strong> {{ $json.company_number }}<br><strong>Score:</strong> {{ $json.composite_score }}/100 ({{ $json.risk_grade }})</p><h3>Why review is required</h3><ul>{{ ($json.onboarding_reasons || []).map(x => `<li>${x}</li>`).join('') }}</ul><p><em>Automated screening supports human review; it is not an approval or adverse-action decision.</em></p>",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        -16,
+        144
+      ],
+      "id": "ab855b13-7e70-46a5-a595-d411b72e1722",
+      "name": "Send enhanced review request",
+      "credentials": {
+        "smtp": {
+          "name": "SMTP account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "REPLACE_WITH_APPROVED_SENDER_EMAIL",
+        "toEmail": "REPLACE_WITH_ALERT_RECIPIENT_EMAIL",
+        "subject": "=New company awaiting approval — {{ $json.vendor_name }}",
+        "html": "=<h2>New company awaiting standard review</h2><p><strong>Company:</strong> {{ $json.vendor_name }}<br><strong>Company number:</strong> {{ $json.company_number }}<br><strong>Score:</strong> {{ $json.composite_score }}/100 ({{ $json.risk_grade }})</p><h3>Why review is required</h3><ul>{{ ($json.onboarding_reasons || []).map(x => `<li>${x}</li>`).join('') }}</ul><p><em>Automated screening supports human review; it is not an approval or adverse-action decision.</em></p>",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        -16,
+        320
+      ],
+      "id": "6a8062df-0dff-46be-86d0-8c5e0132c2fd",
+      "name": "Send standard review notice",
+      "credentials": {
+        "smtp": {
+          "name": "SMTP account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "REPLACE_WITH_APPROVED_SENDER_EMAIL",
+        "toEmail": "REPLACE_WITH_ALERT_RECIPIENT_EMAIL",
+        "subject": "=Onboarding failed — {{ $('New Company Due-Diligence Intake').item.json['Legal company name'] }}",
+        "html": "=<h2>Company onboarding failed</h2><p>Check the company number, the Python-service logs and the Header Auth credential.</p><pre>{{ $json.error?.message || $json.message || 'No readable error returned.' }}</pre>",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        -720,
+        320
+      ],
+      "id": "ad6da87d-7d3b-41f7-a706-fee525d6ffe8",
+      "name": "Send onboarding failure notice",
+      "credentials": {
+        "smtp": {
+          "name": "SMTP account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 6
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -1632,
+        736
+      ],
+      "id": "9879b943-db64-4861-ac6a-337cc8fc87e7",
+      "name": "Daily monitoring schedule"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://python-service:8000/refresh-all",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -1408,
+        736
+      ],
+      "id": "a0962fff-cd30-4ad9-983e-f6576fda2dee",
+      "name": "Refresh all active companies",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Header Auth account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const failures = Array.isArray($json.failures) ? $json.failures : [];\nreturn { json: { ...$json, failure_count: failures.length, alert_count: Array.isArray($json.alerts) ? $json.alerts.length : 0, summary: `Checked ${$json.vendors_checked ?? 0} company records; ${failures.length} failures; ${(Array.isArray($json.alerts) ? $json.alerts.length : 0)} alerts created or updated.` } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1184,
+        656
+      ],
+      "id": "c6945886-2ad7-432b-8fa7-04172f9d7a7d",
+      "name": "Build run summary"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.failure_count }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -960,
+        656
+      ],
+      "id": "20abdbfd-e0a4-41c2-8f23-e60a49e81191",
+      "name": "Any refresh failures?"
+    },
+    {
+      "parameters": {
+        "fromEmail": "REPLACE_WITH_APPROVED_SENDER_EMAIL",
+        "toEmail": "REPLACE_WITH_ALERT_RECIPIENT_EMAIL",
+        "subject": "=Monitoring run has {{ $json.failure_count }} failure(s)",
+        "html": "=<h2>Monitoring run needs attention</h2><p>{{ $json.summary }}</p><pre>{{ JSON.stringify($json.failures, null, 2) }}</pre>",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        -720,
+        592
+      ],
+      "id": "cfa7f08b-8edf-4207-aba1-16c93eb456e6",
+      "name": "Send monitoring failure notice",
+      "credentials": {
+        "smtp": {
+          "name": "SMTP account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        -720,
+        752
+      ],
+      "id": "d4570533-358d-49bc-909d-3e86b875acd3",
+      "name": "No operation — run complete"
+    },
+    {
+      "parameters": {
+        "fromEmail": "REPLACE_WITH_APPROVED_SENDER_EMAIL",
+        "toEmail": "REPLACE_WITH_ALERT_RECIPIENT_EMAIL",
+        "subject": "Daily monitoring could not contact the backend",
+        "html": "=<h2>Backend refresh failed</h2><p>Check Docker, Supabase connectivity and Python-service logs.</p><pre>{{ $json.error?.message || $json.message || 'No readable error returned.' }}</pre>",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        -1184,
+        896
+      ],
+      "id": "0caaa576-e529-4f01-909f-049716292ec7",
+      "name": "Send backend failure notice",
+      "credentials": {
+        "smtp": {
+          "name": "SMTP account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "New Company Due-Diligence Intake": {
+      "main": [
+        [
+          {
+            "node": "Map existing intake fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map existing intake fields": {
+      "main": [
+        [
+          {
+            "node": "Remove empty answers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Remove empty answers": {
+      "main": [
+        [
+          {
+            "node": "Create and screen company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create and screen company": {
+      "main": [
+        [
+          {
+            "node": "Classify onboarding route",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send onboarding failure notice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify onboarding route": {
+      "main": [
+        [
+          {
+            "node": "Is blocked?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is blocked?": {
+      "main": [
+        [
+          {
+            "node": "Send blocked escalation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Needs enhanced review?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs enhanced review?": {
+      "main": [
+        [
+          {
+            "node": "Send enhanced review request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send standard review notice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily monitoring schedule": {
+      "main": [
+        [
+          {
+            "node": "Refresh all active companies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Refresh all active companies": {
+      "main": [
+        [
+          {
+            "node": "Build run summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send backend failure notice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build run summary": {
+      "main": [
+        [
+          {
+            "node": "Any refresh failures?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any refresh failures?": {
+      "main": [
+        [
+          {
+            "node": "Send monitoring failure notice",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No operation — run complete",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "tags": []
+}

@@ -1,3 +1,5 @@
+import os
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 from config import DATABASE_URL
@@ -17,5 +19,7 @@ def get_db():
 
 
 def init_db():
-    import models  # noqa: F401  (ensures models are registered before create_all)
+    if os.getenv("ALLOW_LEGACY_SCHEMA_CREATE", "false").lower() not in {"1", "true", "yes"}:
+        return
+    import models  # noqa: F401
     Base.metadata.create_all(bind=engine)

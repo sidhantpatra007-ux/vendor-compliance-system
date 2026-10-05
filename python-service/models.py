@@ -36,6 +36,7 @@ class Vendor(Base):
     delivery_countries = Column(String, nullable=True)
     uses_subcontractors = Column(String, nullable=True)
     supplier_declaration_accepted = Column(Boolean, nullable=True)
+    archived_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     snapshots = relationship(
@@ -44,6 +45,7 @@ class Vendor(Base):
     financial_records = relationship("FinancialRecord", back_populates="vendor")
     filing_evidence_pages = relationship("FilingEvidencePage", back_populates="vendor")
     company_events = relationship("CompanyEvent", back_populates="vendor")
+    risk_events = relationship("RiskEvent", back_populates="vendor")
     alerts = relationship("Alert", back_populates="vendor")
     review_decisions = relationship("ReviewerDecision", back_populates="vendor", order_by="ReviewerDecision.created_at.desc()")
 
@@ -73,6 +75,7 @@ class ComplianceSnapshot(Base):
     factors = Column(JSON, nullable=False)
 
     recommend_manual_review = Column(Boolean, default=False, nullable=False)
+    financial_document_hash = Column(String, nullable=True, index=True)
 
     vendor = relationship("Vendor", back_populates="snapshots")
     financial_records = relationship("FinancialRecord", back_populates="snapshot")
@@ -177,6 +180,163 @@ class CompanyEvent(Base):
     )
 
 
+class RiskEvent(Base):
+    """Normalized source event. Events are evidence, not score decisions."""
+    __tablename__ = "risk_events"
+
+    id = Column(BigInteger, primary_key=True)
+    vendor_id = Column(BigInteger, ForeignKey("vendors.id"), nullable=False, index=True)
+    source = Column(String, nullable=False, index=True)
+    source_event_id = Column(String, nullable=True)
+    event_type = Column(String, nullable=False, index=True)
+    category = Column(String, nullable=False, index=True)
+    occurred_at = Column(DateTime, nullable=True, index=True)
+    detected_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    title = Column(String, nullable=False)
+    description = Column(String, nullable=True)
+    raw_payload = Column(JSON, nullable=True)
+    normalized_payload = Column(JSON, nullable=False, default=dict)
+    source_url = Column(String, nullable=True)
+    source_timestamp = Column(DateTime, nullable=True)
+    confidence = Column(String, nullable=False, default="MEDIUM")
+    source_reliability = Column(String, nullable=False)
+    severity = Column(String, nullable=False, default="INFO")
+    fingerprint = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    vendor = relationship("Vendor", back_populates="risk_events")
+    evidence_items = relationship("EventEvidence", back_populates="event", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint("vendor_id", "source", "fingerprint", name="uq_risk_event_fingerprint"),
+    )
+
+
+class EventEvidence(Base):
+    __tablename__ = "event_evidence"
+
+    id = Column(BigInteger, primary_key=True)
+    event_id = Column(BigInteger, ForeignKey("risk_events.id", ondelete="CASCADE"), nullable=False, index=True)
+    source = Column(String, nullable=False)
+    source_url = Column(String, nullable=True)
+    source_record_id = Column(String, nullable=True)
+    retrieved_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    occurred_at = Column(DateTime, nullable=True)
+    source_version = Column(String, nullable=True)
+    raw_reference = Column(String, nullable=True)
+    content_hash = Column(String, nullable=False, index=True)
+    metadata_json = Column("metadata", JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    event = relationship("RiskEvent", back_populates="evidence_items")
+
+
+class SourceSyncState(Base):
+    __tablename__ = "source_sync_states"
+
+    id = Column(BigInteger, primary_key=True)
+    vendor_id = Column(BigInteger, ForeignKey("vendors.id", ondelete="CASCADE"), nullable=False, index=True)
+    source = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="unknown")
+    last_successful_sync = Column(DateTime, nullable=True)
+    last_attempted_sync = Column(DateTime, nullable=True)
+    source_timestamp = Column(DateTime, nullable=True)
+    last_error = Column(String, nullable=True)
+    metadata_json = Column("metadata", JSON, nullable=False, default=dict)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("vendor_id", "source", name="uq_source_sync_vendor_source"),
+    )
+
+
+class RiskDimensionSnapshot(Base):
+    __tablename__ = "risk_dimension_snapshots"
+
+    id = Column(BigInteger, primary_key=True)
+    vendor_id = Column(BigInteger, ForeignKey("vendors.id", ondelete="CASCADE"), nullable=False, index=True)
+    snapshot_id = Column(BigInteger, ForeignKey("compliance_snapshots.id", ondelete="CASCADE"), nullable=False, index=True)
+    dimension = Column(String, nullable=False)
+    state = Column(String, nullable=False)
+    score = Column(BigInteger, nullable=True)
+    confidence = Column(String, nullable=False)
+    summary = Column(String, nullable=False)
+    details = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (UniqueConstraint("snapshot_id", "dimension", name="uq_risk_dimension_snapshot"),)
+
+
+class ScoreChangeRecord(Base):
+    __tablename__ = "score_change_records"
+
+    id = Column(BigInteger, primary_key=True)
+    vendor_id = Column(BigInteger, ForeignKey("vendors.id", ondelete="CASCADE"), nullable=False, index=True)
+    snapshot_id = Column(BigInteger, ForeignKey("compliance_snapshots.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    previous_snapshot_id = Column(BigInteger, ForeignKey("compliance_snapshots.id"), nullable=True)
+    previous_score = Column(BigInteger, nullable=True)
+    current_score = Column(BigInteger, nullable=False)
+    score_delta = Column(BigInteger, nullable=True)
+    trend = Column(String, nullable=False)
+    explanation = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class RiskRule(Base):
+    __tablename__ = "risk_rules"
+
+    id = Column(BigInteger, primary_key=True)
+    rule_key = Column(String, nullable=False, unique=True, index=True)
+    name = Column(String, nullable=False)
+    category = Column(String, nullable=False)
+    event_type = Column(String, nullable=True)
+    severity = Column(String, nullable=False)
+    conditions = Column(JSON, nullable=False, default=dict)
+    base_delta = Column(BigInteger, nullable=True)
+    affects_score = Column(Boolean, nullable=False, default=False)
+    affects_alert = Column(Boolean, nullable=False, default=True)
+    enabled = Column(Boolean, nullable=False, default=True)
+    version = Column(String, nullable=False, default="1.0.0")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class SourceReliabilityConfig(Base):
+    __tablename__ = "source_reliability_configs"
+
+    id = Column(BigInteger, primary_key=True)
+    source = Column(String, nullable=False, unique=True, index=True)
+    reliability = Column(String, nullable=False)
+    enabled = Column(Boolean, nullable=False, default=False)
+    description = Column(String, nullable=False)
+    metadata_json = Column("metadata", JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class EventReviewDecision(Base):
+    __tablename__ = "event_review_decisions"
+
+    id = Column(BigInteger, primary_key=True)
+    event_id = Column(BigInteger, ForeignKey("risk_events.id", ondelete="CASCADE"), nullable=False, index=True)
+    decision = Column(String, nullable=False)
+    reviewer = Column(String, nullable=False)
+    note = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class AuditReportSnapshot(Base):
+    __tablename__ = "audit_report_snapshots"
+
+    id = Column(BigInteger, primary_key=True)
+    vendor_id = Column(BigInteger, ForeignKey("vendors.id", ondelete="CASCADE"), nullable=False, index=True)
+    snapshot_id = Column(BigInteger, ForeignKey("compliance_snapshots.id", ondelete="SET NULL"), nullable=True)
+    report_version = Column(String, nullable=False, default="1.0.0")
+    generated_by = Column(String, nullable=False)
+    payload = Column(JSON, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class Alert(Base):
     __tablename__ = "alerts"
 
@@ -191,15 +351,60 @@ class Alert(Base):
     evidence = Column(JSON, nullable=False, default=list)
     assigned_to = Column(String, nullable=True)
     acknowledged_at = Column(DateTime, nullable=True)
+    acknowledged_by = Column(String, nullable=True)
     resolved_at = Column(DateTime, nullable=True)
+    resolved_by = Column(String, nullable=True)
     resolution_note = Column(String, nullable=True)
     sla_due_at = Column(DateTime, nullable=False)
     escalated_at = Column(DateTime, nullable=True)
+    notification_state = Column(String, nullable=False, default="pending")
+    notification_count = Column(BigInteger, nullable=False, default=0)
+    last_notified_at = Column(DateTime, nullable=True)
+    notification_last_error = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     vendor = relationship("Vendor", back_populates="alerts")
     snapshot = relationship("ComplianceSnapshot")
+
+
+class AlertAction(Base):
+    __tablename__ = "alert_actions"
+
+    id = Column(BigInteger, primary_key=True)
+    alert_id = Column(BigInteger, ForeignKey("alerts.id", ondelete="CASCADE"), nullable=False, index=True)
+    action = Column(String, nullable=False)
+    actor = Column(String, nullable=True)
+    note = Column(String, nullable=True)
+    details = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class FinancialEvidenceReview(Base):
+    __tablename__ = "financial_evidence_reviews"
+
+    id = Column(BigInteger, primary_key=True)
+    vendor_id = Column(BigInteger, ForeignKey("vendors.id", ondelete="CASCADE"), nullable=False, index=True)
+    snapshot_id = Column(BigInteger, ForeignKey("compliance_snapshots.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String, nullable=False, default="pending")
+    reviewer = Column(String, nullable=True)
+    note = Column(String, nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("vendor_id", "snapshot_id", name="uq_financial_evidence_review_snapshot"),
+    )
+
+
+class VendorRefreshLock(Base):
+    __tablename__ = "vendor_refresh_locks"
+
+    vendor_id = Column(BigInteger, ForeignKey("vendors.id", ondelete="CASCADE"), primary_key=True)
+    owner_token = Column(String, nullable=False)
+    acquired_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
 
 
 class AuditLog(Base):

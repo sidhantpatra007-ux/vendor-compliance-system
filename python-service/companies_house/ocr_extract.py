@@ -35,9 +35,15 @@ from companies_house.amount_parse import parse_amounts_in_line
 # generous headroom for outliers without letting a malformed or
 # unusually large document run unbounded.
 MAX_OCR_PAGES = 30
+MAX_CANDIDATE_PAGES = 8
+SCREEN_DPI = 140
+OCR_DPI = 300
 
-# 210 DPI balances OCR accuracy against memory/time per page.
-OCR_DPI = 210
+_PAGE_MARKERS = (
+    "balance sheet", "statement of financial position", "profit and loss",
+    "income statement", "current assets", "net assets", "creditors",
+    "capital and reserves", "notes to the financial statements",
+)
 
 _NIL_RE_WORDS = ("nil", "none")
 
@@ -52,7 +58,29 @@ def _is_nil_remainder(remainder_lower: str) -> bool:
     return False
 
 
-def _ocr_page_lines(text: str, page_num: int, avg_confidence: float = None) -> list[dict]:
+def _mean_confidence(data: dict) -> float | None:
+    values = []
+    for value in data.get("conf", []):
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed >= 0:
+            values.append(parsed)
+    return round(sum(values) / len(values), 1) if values else None
+
+
+def _financial_page_score(text: str) -> int:
+    lowered = (text or "").lower()
+    marker_hits = sum(marker in lowered for marker in _PAGE_MARKERS)
+    concept_hits = sum(
+        any(_matches(lowered, keyword) for keyword in keywords)
+        for keywords in CONCEPT_KEYWORDS.values()
+    )
+    return marker_hits * 3 + concept_hits
+
+
+def _ocr_page_lines(text: str, page_num: int, avg_confidence: float = None, page_score: int = 0) -> list[dict]:
     """
     Scans OCR'd text from a single page for CONCEPT_KEYWORDS matches,
     using the same amount-parsing rules as pdf_extract.py. Returns a
@@ -100,6 +128,12 @@ def _ocr_page_lines(text: str, page_num: int, avg_confidence: float = None) -> l
                     "raw_line": line,
                     "page": page_num,
                     "ocr_confidence": avg_confidence,
+                    "page_financial_score": page_score,
+                    "validation": {
+                        "label_matched": True,
+                        "single_value": state in {"PRESENT", "NIL"},
+                        "financial_page": page_score > 0,
+                    },
                     "needs_manual_review": True,
                     "evidence_image_base64": None,
                     "evidence_saved_path": None,
@@ -114,6 +148,7 @@ def extract_candidates_via_ocr(
     pdf_path: str,
     max_pages: int = MAX_OCR_PAGES,
     dpi: int = OCR_DPI,
+    evidence_set: str = None,
 ) -> list[dict]:
     """
     Processes a scanned PDF one page at a time via OCR, extracting
@@ -123,55 +158,42 @@ def extract_candidates_via_ocr(
     """
     from companies_house.evidence import capture_from_pil_image
 
-    all_candidates = []
-
-    info = pdfinfo_from_path(pdf_path)
-    total_pages = info["Pages"]
+    try:
+        total_pages = pdfinfo_from_path(pdf_path)["Pages"]
+    except Exception:
+        return []
     pages_to_process = min(total_pages, max_pages)
-
-    if total_pages > max_pages:
-        print(f"[ocr] WARNING: {total_pages} pages found, capping at {max_pages}", file=sys.stderr, flush=True)
-
-    print(f"[ocr] starting OCR pass: {pages_to_process} page(s) at {dpi} DPI", file=sys.stderr, flush=True)
+    ranked_pages = []
 
     for page_num in range(1, pages_to_process + 1):
-        print(f"[ocr] processing page {page_num}/{pages_to_process}...", file=sys.stderr, flush=True)
-
-        images = convert_from_path(pdf_path, first_page=page_num, last_page=page_num, dpi=dpi)
-        if not images:
-            print(f"[ocr] page {page_num} produced no image, skipping", file=sys.stderr, flush=True)
+        try:
+            image = convert_from_path(pdf_path, first_page=page_num, last_page=page_num, dpi=SCREEN_DPI)[0]
+            score = _financial_page_score(pytesseract.image_to_string(image))
+            if score:
+                ranked_pages.append((score, page_num))
+            del image
+        except Exception:
             continue
 
-        page_image = images[0]
-
+    selected = sorted(ranked_pages, key=lambda item: (-item[0], item[1]))[:MAX_CANDIDATE_PAGES]
+    print(f"[ocr] selected {len(selected)} financial page(s) from {pages_to_process}", file=sys.stderr, flush=True)
+    all_candidates = []
+    for page_score, page_num in selected:
         try:
-            data = pytesseract.image_to_data(page_image, output_type=pytesseract.Output.DICT)
-            confidences = [int(c) for c in data.get("conf", []) if c not in ("-1", -1)]
-            avg_confidence = round(sum(confidences) / len(confidences), 1) if confidences else None
+            images = convert_from_path(pdf_path, first_page=page_num, last_page=page_num, dpi=dpi)
+            if not images:
+                continue
+            image = images[0]
+            data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+            confidence = _mean_confidence(data)
+            candidates = _ocr_page_lines(pytesseract.image_to_string(image), page_num, confidence, page_score)
+            if candidates:
+                evidence = capture_from_pil_image(company_number, image, page_num, evidence_set=evidence_set)
+                for candidate in candidates:
+                    candidate["evidence_image_base64"] = evidence["image_base64"] if evidence else None
+                    candidate["evidence_saved_path"] = evidence["saved_path"] if evidence else None
+            all_candidates.extend(candidates)
+            del images, image
         except Exception:
-            avg_confidence = None
-
-        text = pytesseract.image_to_string(page_image)
-        candidates = _ocr_page_lines(text, page_num, avg_confidence)
-
-        if candidates:
-            evidence = capture_from_pil_image(company_number, page_image, page_num)
-            for c in candidates:
-                c["evidence_image_base64"] = evidence["image_base64"] if evidence else None
-                c["evidence_saved_path"] = evidence["saved_path"] if evidence else None
-
-        all_candidates.extend(candidates)
-
-        print(
-            f"[ocr] page {page_num} done — {len(candidates)} candidate(s), confidence={avg_confidence}",
-            file=sys.stderr, flush=True,
-        )
-
-        del images, page_image
-
-    print(
-        f"[ocr] finished — {pages_to_process} page(s) processed, {len(all_candidates)} total candidate(s)",
-        file=sys.stderr, flush=True,
-    )
-
+            continue
     return all_candidates

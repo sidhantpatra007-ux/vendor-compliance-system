@@ -1,0 +1,20 @@
+# Keep secrets and runtime data OUT of the image. The Dockerfile does `COPY . .`,
+# so anything not listed here is baked into the image layers.
+.env
+.env.*
+!.env.example
+data/
+evidence/
+.git
+.gitignore
+.dockerignore
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+*.log
+*.sqlite
+*.db

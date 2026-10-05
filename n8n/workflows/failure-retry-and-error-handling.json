@@ -1,0 +1,145 @@
+{
+  "name": "Failure, retry and error handling",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        -160
+      ],
+      "id": "41c1a2c8-8d32-47f8-9372-76bee9444a72",
+      "name": "n8n Error Trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "return { json: $json };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        464,
+        -160
+      ],
+      "id": "13a668c3-4165-4ba8-ae7f-78c5129f0ecb",
+      "name": "Capture failed execution"
+    },
+    {
+      "parameters": {
+        "url": "http://python-service:8000/operations/health",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        672,
+        -160
+      ],
+      "id": "12175a85-0efd-4c8b-85e9-7f96ffb9b8b7",
+      "name": "Get backend operations health",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Header Auth account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const failure = $('Capture failed execution').item.json;\nconst health = $json;\nconst execution = failure.execution || {};\nconst error = execution.error || failure.error || {};\nreturn { json: { subject: `Workflow failure — ${execution.workflow?.name || failure.workflow?.name || 'Unknown workflow'}`, html: `<h2>n8n workflow needs attention</h2><p><strong>Workflow:</strong> ${execution.workflow?.name || failure.workflow?.name || 'Unknown'}<br><strong>Execution:</strong> ${execution.id || failure.execution?.id || 'Unknown'}<br><strong>Time:</strong> ${new Date().toISOString()}</p><h3>Error</h3><pre>${error.message || failure.error?.message || 'No readable error supplied.'}</pre><h3>Backend health</h3><pre>${JSON.stringify(health, null, 2)}</pre><p>Retry only after checking the backend, source availability and credentials.</p>` } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        -160
+      ],
+      "id": "2f5a3a82-a339-4c20-91f8-4da5d5dfe213",
+      "name": "Build health warning"
+    },
+    {
+      "parameters": {
+        "fromEmail": "REPLACE_WITH_APPROVED_SENDER_EMAIL",
+        "toEmail": "REPLACE_WITH_ALERT_RECIPIENT_EMAIL",
+        "subject": "={{ $json.subject }}",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1120,
+        -160
+      ],
+      "id": "29eb3c0d-f6eb-4141-bb33-80bd193f3970",
+      "name": "Send health warning",
+      "credentials": {
+        "smtp": {
+          "name": "SMTP account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "n8n Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Capture failed execution",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Capture failed execution": {
+      "main": [
+        [
+          {
+            "node": "Get backend operations health",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get backend operations health": {
+      "main": [
+        [
+          {
+            "node": "Build health warning",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build health warning": {
+      "main": [
+        [
+          {
+            "node": "Send health warning",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "tags": []
+}

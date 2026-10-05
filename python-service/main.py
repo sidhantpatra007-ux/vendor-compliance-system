@@ -3,12 +3,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from starlette.middleware.sessions import SessionMiddleware
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import hmac
 import os
 import re
 import httpx
+import uuid
 
 from database import init_db, SessionLocal
 from models import (
@@ -22,7 +24,15 @@ from models import (
     AuditLog,
     JobRun,
     ReviewerDecision,
+    RiskEvent,
+    SourceSyncState,
+    VendorRefreshLock,
 )
+from event_store import persist_event, record_source_sync, serialize_event
+from risk_endpoints import register_risk_routes
+from risk_intelligence import alert_policy, materialize_risk_analysis
+from source_adapters.companies_house import normalize_stream_event
+from source_adapters.sanctions import normalize_screening_result
 from config import (
     ALERT_SCORE_DROP_THRESHOLD, ALERT_SLA_HOURS, ALLOWED_ORIGINS,
     COMPANIES_HOUSE_STREAM_API_KEY, COMPANIES_HOUSE_STREAM_ENABLED,
@@ -88,6 +98,9 @@ def require_dashboard_session(request: Request):
         raise HTTPException(503, "Dashboard login is not configured")
     if not request.session.get("dashboard_authenticated"):
         raise HTTPException(401, "Dashboard login required")
+
+
+register_risk_routes(app, get_db, require_api_key, require_dashboard_session)
 
 
 @app.on_event("startup")
@@ -235,6 +248,8 @@ def _process_companies_house_event(stream_name: str, event: dict) -> None:
                 db.add(company_event)
                 db.flush()
 
+            persist_event(db, vendor.id, normalize_stream_event(stream_name, event, datetime.utcnow()))
+
             # The existing evaluator remains the single source of truth for
             # scores. A stream event simply makes its refresh immediate rather
             # than waiting for n8n's scheduled batch run.
@@ -245,6 +260,11 @@ def _process_companies_house_event(stream_name: str, event: dict) -> None:
             company_event.snapshot_id = snapshot.id
             company_event.processed_at = datetime.utcnow()
             company_event.processing_error = None
+            record_source_sync(
+                db, vendor.id, "companies_house", success=True,
+                source_timestamp=company_event.published_at,
+                metadata={"stream_name": stream_name, "timepoint": timepoint},
+            )
             db.commit()
     except Exception as exc:
         db.rollback()
@@ -316,7 +336,7 @@ def _add_financial_trends(db: Session, vendor_id: int, result: dict) -> None:
     result.update(score_from_signals(current))
 
 
-def _run_and_save_snapshot(db: Session, vendor: Vendor) -> ComplianceSnapshot:
+def _run_and_save_snapshot(db: Session, vendor: Vendor, evaluation_result: dict | None = None) -> ComplianceSnapshot:
     """
     Runs evaluate_company(), saves the computed score as a ComplianceSnapshot
     row, and saves each extracted financial line item as its own
@@ -324,7 +344,43 @@ def _run_and_save_snapshot(db: Session, vendor: Vendor) -> ComplianceSnapshot:
     client-confirmed override for the same concept. Shared by onboarding,
     single-vendor refresh, and bulk refresh-all.
     """
-    result = evaluate_company(vendor.company_number)
+    if evaluation_result is None:
+        try:
+            result = evaluate_company(vendor.company_number)
+        except Exception as exc:
+            record_source_sync(db, vendor.id, "companies_house", success=False, error=str(exc))
+            db.commit()
+            raise
+    else:
+        result = evaluation_result
+    signals = result["signals"]
+    previous_snapshot = db.query(ComplianceSnapshot).filter(
+        ComplianceSnapshot.vendor_id == vendor.id
+    ).order_by(ComplianceSnapshot.checked_at.desc()).first()
+    current_pscs = sorted(
+        (item.get("name"), item.get("kind"), tuple(item.get("natures_of_control") or []))
+        for item in signals.get("active_pscs", [])
+    )
+    previous_pscs = sorted(
+        (item.get("name"), item.get("kind"), tuple(item.get("natures_of_control") or []))
+        for item in ((previous_snapshot.signals or {}).get("active_pscs", []) if previous_snapshot else [])
+    )
+    signals["psc_changed_recently"] = bool(previous_snapshot and current_pscs != previous_pscs)
+    if signals.get("psc_details_unclear"):
+        quality = signals.setdefault("data_quality", {})
+        quality["issues"] = list(dict.fromkeys((quality.get("issues") or []) + ["psc_details_unclear"]))
+        quality["confidence"] = "low" if quality.get("confidence") == "low" else "medium"
+    result.update(score_from_signals(signals))
+    record_source_sync(
+        db, vendor.id, "companies_house", success=True,
+        metadata={"company_number": vendor.company_number},
+    )
+    record_source_sync(
+        db, vendor.id, "uk_sanctions_list",
+        success=bool(signals.get("sanctions_screening_available")),
+        error=signals.get("sanctions_screening_error"),
+        metadata={"list_version": signals.get("sanctions_list_version")},
+    )
     _add_financial_trends(db, vendor.id, result)
     overrides = _carry_forward_overrides(db, vendor.id)
 
@@ -336,8 +392,9 @@ def _run_and_save_snapshot(db: Session, vendor: Vendor) -> ComplianceSnapshot:
     # old JSON-blob version used, just against the new per-row shape.
     recommend_manual_review = result.get("recommend_manual_review", False)
     if candidates:
-        recommend_manual_review = any(
-            candidates[c].get("state") != "PRESENT" and c not in overrides
+        recommend_manual_review = recommend_manual_review or any(
+            candidates[c].get("source") in {"ocr", "pdf_text"}
+            and not candidates[c].get("client_edited", False)
             for c in candidates
         )
 
@@ -350,10 +407,21 @@ def _run_and_save_snapshot(db: Session, vendor: Vendor) -> ComplianceSnapshot:
         categories=result["categories"],
         factors=result["factors"],
         recommend_manual_review=recommend_manual_review,
+        financial_document_hash=result.get("financial_document_hash"),
     )
     db.add(snapshot)
     db.commit()
     db.refresh(snapshot)
+
+    event = normalize_screening_result(vendor.display_name, "company", signals)
+    if event:
+        persist_event(db, vendor.id, event)
+    for match in signals.get("people_sanctions_matches") or []:
+        event = normalize_screening_result(
+            match.get("name", "Unknown subject"), match.get("subject_type", "person"), match
+        )
+        if event:
+            persist_event(db, vendor.id, event)
 
     # One FinancialRecord row per extracted concept.
     for concept, data in candidates.items():
@@ -403,6 +471,8 @@ def _run_and_save_snapshot(db: Session, vendor: Vendor) -> ComplianceSnapshot:
             evidence_page=reference.get("page"),
         ))
 
+    db.commit()
+    materialize_risk_analysis(db, vendor, snapshot)
     db.commit()
     return snapshot
 
@@ -534,6 +604,36 @@ def _audit(db: Session, action: str, vendor_id: int = None, alert_id: int = None
     ))
 
 
+def _acquire_refresh_lock(db: Session, vendor_id: int) -> str | None:
+    now = datetime.utcnow()
+    db.query(VendorRefreshLock).filter(
+        VendorRefreshLock.vendor_id == vendor_id,
+        VendorRefreshLock.expires_at <= now,
+    ).delete()
+    token = uuid.uuid4().hex
+    try:
+        db.add(VendorRefreshLock(
+            vendor_id=vendor_id,
+            owner_token=token,
+            expires_at=now + timedelta(minutes=10),
+        ))
+        db.commit()
+        return token
+    except IntegrityError:
+        db.rollback()
+        return None
+
+
+def _release_refresh_lock(db: Session, vendor_id: int, token: str | None):
+    if not token:
+        return
+    db.query(VendorRefreshLock).filter(
+        VendorRefreshLock.vendor_id == vendor_id,
+        VendorRefreshLock.owner_token == token,
+    ).delete()
+    db.commit()
+
+
 def _severity(diff: dict) -> str:
     levels = {"critical": 4, "high": 3, "medium": 2, "low": 1}
     found = [f.get("severity", "low") for f in diff["new_factors"]]
@@ -561,15 +661,20 @@ def _open_alert(db: Session, vendor: Vendor, snapshot: ComplianceSnapshot, diff:
         return existing, False
     evidence = [{"type": "factor", "code": f.get("code"), "description": f.get("description")} for f in serious]
     evidence.extend({"type": "signal", **change} for change in diff.get("changed_signals", []))
+    base_severity = _severity(diff) if serious else "medium"
+    effective_severity, sla_hours = alert_policy(
+        vendor.supplier_criticality,
+        base_severity,
+    )
     alert = Alert(
         vendor_id=vendor.id,
         snapshot_id=snapshot.id,
         dedup_key=dedup_key,
-        severity=_severity(diff) if serious else "medium",
+        severity=effective_severity,
         title=f"Vendor risk change: {vendor.display_name}",
         reason=summarize_diff(vendor.display_name, diff),
         evidence=evidence,
-        sla_due_at=datetime.utcnow() + timedelta(hours=ALERT_SLA_HOURS),
+        sla_due_at=datetime.utcnow() + timedelta(hours=sla_hours),
     )
     db.add(alert)
     db.flush()
@@ -652,8 +757,11 @@ def add_vendor(
 
 
 @app.get("/vendors")
-def list_vendors(db: Session = Depends(get_db), auth=Depends(require_api_key)):
-    vendors = db.query(Vendor).all()
+def list_vendors(include_archived: bool = False, db: Session = Depends(get_db), auth=Depends(require_api_key)):
+    query = db.query(Vendor)
+    if not include_archived:
+        query = query.filter(Vendor.archived_at.is_(None))
+    vendors = query.all()
     result = []
     for vendor in vendors:
         latest = (
@@ -673,6 +781,38 @@ def list_vendors(db: Session = Depends(get_db), auth=Depends(require_api_key)):
             "data_confidence": (latest.signals or {}).get("data_quality", {}).get("confidence") if latest else None,
         })
     return result
+
+
+@app.get("/vendors/{vendor_id}/events")
+def list_vendor_events(
+    vendor_id: int,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    auth=Depends(require_api_key),
+):
+    if not 1 <= limit <= 500:
+        raise HTTPException(400, "limit must be between 1 and 500")
+    if not db.query(Vendor).filter(Vendor.id == vendor_id).first():
+        raise HTTPException(404, "Vendor not found")
+    events = db.query(RiskEvent).filter(RiskEvent.vendor_id == vendor_id).order_by(
+        RiskEvent.detected_at.desc(), RiskEvent.id.desc()
+    ).limit(limit).all()
+    return [serialize_event(event) for event in events]
+
+
+@app.get("/sources/health")
+def source_health(db: Session = Depends(get_db), auth=Depends(require_api_key)):
+    rows = db.query(SourceSyncState).order_by(SourceSyncState.source, SourceSyncState.vendor_id).all()
+    return [{
+        "vendor_id": row.vendor_id,
+        "source": row.source,
+        "status": row.status,
+        "last_successful_sync": row.last_successful_sync.isoformat() if row.last_successful_sync else None,
+        "last_attempted_sync": row.last_attempted_sync.isoformat() if row.last_attempted_sync else None,
+        "source_timestamp": row.source_timestamp.isoformat() if row.source_timestamp else None,
+        "last_error": row.last_error,
+        "metadata": row.metadata_json,
+    } for row in rows]
 
 
 # ---------- Full vendor dossier (detail view) ----------
@@ -902,6 +1042,7 @@ def onboard_vendor(
     delivery_countries: str = None,
     uses_subcontractors: str = None,
     supplier_declaration_accepted: bool = None,
+    evaluation_result: dict | None = None,
     db: Session = Depends(get_db),
     auth=Depends(require_api_key),
 ):
@@ -924,6 +1065,9 @@ def onboard_vendor(
         for field, value in updates.items():
             if value is not None:
                 setattr(existing_vendor, field, value)
+        if existing_vendor.archived_at:
+            existing_vendor.archived_at = None
+            _audit(db, "vendor_reactivated", existing_vendor.id)
         snapshot = _run_and_save_snapshot(db, existing_vendor)
         _audit(db, "vendor_rechecked_on_onboarding", existing_vendor.id)
         db.commit()
@@ -959,7 +1103,7 @@ def onboard_vendor(
     db.commit()
     db.refresh(vendor)
 
-    snapshot = _run_and_save_snapshot(db, vendor)
+    snapshot = _run_and_save_snapshot(db, vendor, evaluation_result)
     _audit(db, "vendor_onboarded", vendor.id)
     db.commit()
 
@@ -971,6 +1115,106 @@ def onboard_vendor(
     }
 
 
+# ---------- Bulk onboarding (Workflow 5) ----------
+
+@app.post("/vendors/bulk-onboard")
+def bulk_onboard_vendors(
+    body: dict = Body(...),
+    db: Session = Depends(get_db),
+    auth=Depends(require_api_key),
+):
+    """Create or refresh up to 100 companies from a CSV-derived payload."""
+    companies = body.get("companies") if isinstance(body, dict) else None
+    if not isinstance(companies, list) or not companies:
+        raise HTTPException(400, "companies must be a non-empty array")
+    if len(companies) > 100:
+        raise HTTPException(400, "a bulk request may contain at most 100 companies")
+
+    allowed = {
+        "trading_name", "address_street", "address_city", "address_postcode",
+        "contact_name", "contact_email", "contact_phone", "vendor_category",
+        "goods_or_services", "supplier_criticality", "annual_spend_band",
+        "access_to_client_systems_or_data", "processes_personal_data",
+        "delivery_countries", "uses_subcontractors",
+    }
+    seen = set()
+    results = []
+
+    for position, row in enumerate(companies, start=1):
+        if not isinstance(row, dict):
+            results.append({"row": position, "status": "onboarding_failed", "error": "each company must be an object"})
+            continue
+        try:
+            company_number = _validate_company_number(str(row.get("company_number") or "").strip())
+            if company_number in seen:
+                results.append({"row": position, "company_number": company_number, "status": "skipped_duplicate"})
+                continue
+            seen.add(company_number)
+
+            existing_vendor = db.query(Vendor).filter(Vendor.company_number == company_number).first()
+            supplied_name = row.get("display_name")
+            display_name = supplied_name.strip() if isinstance(supplied_name, str) else ""
+            if not display_name:
+                from companies_house.client import get_company_profile
+
+                profile = get_company_profile(company_number)
+                display_name = str(profile.get("company_name") or "").strip()
+                if not display_name:
+                    raise ValueError("Companies House returned no company name")
+
+            # A first-time company is evaluated before a Vendor row is committed.
+            # If Companies House or another source fails, only this upload result is
+            # retained; no unassessed vendor record is left in the dashboard.
+            prefetched_result = None
+            if existing_vendor is None:
+                prefetched_result = evaluate_company(company_number)
+
+            declaration = row.get("supplier_declaration_accepted")
+            if isinstance(declaration, str):
+                declaration = declaration.strip().lower() in {"true", "yes", "1"}
+            extras = {key: row.get(key) for key in allowed if row.get(key) is not None}
+            response = onboard_vendor(
+                company_number=company_number,
+                display_name=display_name,
+                supplier_declaration_accepted=declaration,
+                evaluation_result=prefetched_result,
+                db=db,
+                auth=auth,
+                **extras,
+            )
+            results.append({
+                "row": position,
+                "company_number": company_number,
+                "vendor_id": response["vendor_id"],
+                "vendor_name": response["vendor_name"],
+                "status": "refreshed" if response.get("duplicate") else "created",
+            })
+        except Exception as exc:
+            db.rollback()
+            results.append({
+                "row": position,
+                "company_number": str(row.get("company_number") or "")[:32],
+                "status": "onboarding_failed",
+                "error": str(exc)[:300],
+            })
+
+    created = sum(item["status"] == "created" for item in results)
+    refreshed = sum(item["status"] == "refreshed" for item in results)
+    failed = sum(item["status"] == "onboarding_failed" for item in results)
+    _audit(db, "bulk_onboarding_completed", details={
+        "submitted": len(companies), "created": created,
+        "refreshed": refreshed, "failed": failed,
+    })
+    db.commit()
+    return {
+        "submitted": len(companies),
+        "created": created,
+        "refreshed": refreshed,
+        "failed": failed,
+        "results": results,
+    }
+
+
 # ---------- Scoring & summaries (single vendor) ----------
 
 @app.post("/vendors/{vendor_id}/refresh")
@@ -978,15 +1222,22 @@ def refresh_vendor(vendor_id: int, db: Session = Depends(get_db), auth=Depends(r
     vendor = db.query(Vendor).filter(Vendor.id == vendor_id).first()
     if not vendor:
         raise HTTPException(404, "Vendor not found")
-
-    snapshot = _run_and_save_snapshot(db, vendor)
-    pair = get_last_two_snapshots(db, vendor.id)
-    alert = None
-    if pair and pair[1].id == snapshot.id:
-        alert, _ = _open_alert(db, vendor, snapshot, diff_snapshots(*pair))
-    _audit(db, "vendor_refreshed", vendor.id)
-    db.commit()
-    return {"status": "refreshed", "alert": _alert_dict(alert) if alert else None, **_snapshot_to_dict(db, snapshot)}
+    if vendor.archived_at:
+        raise HTTPException(410, "Vendor is archived and cannot be refreshed")
+    token = _acquire_refresh_lock(db, vendor.id)
+    if not token:
+        raise HTTPException(409, "A refresh for this vendor is already running")
+    try:
+        snapshot = _run_and_save_snapshot(db, vendor)
+        pair = get_last_two_snapshots(db, vendor.id)
+        alert = None
+        if pair and pair[1].id == snapshot.id:
+            alert, _ = _open_alert(db, vendor, snapshot, diff_snapshots(*pair))
+        _audit(db, "vendor_refreshed", vendor.id)
+        db.commit()
+        return {"status": "refreshed", "alert": _alert_dict(alert) if alert else None, **_snapshot_to_dict(db, snapshot)}
+    finally:
+        _release_refresh_lock(db, vendor.id, token)
 
 
 @app.get("/vendors/{vendor_id}/summary")
@@ -1074,7 +1325,7 @@ def save_override(
 
 @app.post("/refresh-all")
 def refresh_all_vendors(db: Session = Depends(get_db), auth=Depends(require_api_key)):
-    vendors = db.query(Vendor).all()
+    vendors = db.query(Vendor).filter(Vendor.archived_at.is_(None)).all()
     alerts = []
     failures = []
     run = JobRun(job_type="refresh_all", status="running", items_total=len(vendors))
@@ -1082,6 +1333,13 @@ def refresh_all_vendors(db: Session = Depends(get_db), auth=Depends(require_api_
     db.commit()
 
     for vendor in vendors:
+        token = _acquire_refresh_lock(db, vendor.id)
+        if not token:
+            failures.append({"vendor_id": vendor.id, "error": "refresh already running"})
+            run.items_failed += 1
+            _audit(db, "refresh_all_vendor_failed", vendor.id, details={"reason": "refresh already running"})
+            db.commit()
+            continue
         try:
             snapshot = _run_and_save_snapshot(db, vendor)
             pair = get_last_two_snapshots(db, vendor.id)
@@ -1096,7 +1354,10 @@ def refresh_all_vendors(db: Session = Depends(get_db), auth=Depends(require_api_
             run = db.query(JobRun).filter(JobRun.id == run.id).one()
             run.items_failed += 1
             failures.append({"vendor_id": vendor.id, "error": str(exc)[:300]})
+            _audit(db, "refresh_all_vendor_failed", vendor.id, details={"reason": str(exc)[:300]})
             db.commit()
+        finally:
+            _release_refresh_lock(db, vendor.id, token)
 
     run = db.query(JobRun).filter(JobRun.id == run.id).one()
     run.status = "completed" if not failures else "completed_with_errors"
